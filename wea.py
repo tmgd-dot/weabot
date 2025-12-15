@@ -44,7 +44,6 @@ async def get_weather_data(query, units):
         country = "US"
 
         # --- PATH A: US ZIP CODE LOOKUP (Zippopotam) ---
-        # Used to ensure we get City names (Highlands Ranch) instead of County names
         if query.replace(" ", "").isdigit() and len(query.strip()) == 5:
             try:
                 zip_url = f"http://api.zippopotam.us/us/{query.strip()}"
@@ -60,7 +59,6 @@ async def get_weather_data(query, units):
                 print(f"Zippopotam lookup failed: {e}")
 
         # --- PATH B: OPENWEATHERMAP FALLBACK ---
-        # Used for International cities or if Zippopotam fails
         if not lat or not lon:
             geo_url = f"http://api.openweathermap.org/geo/1.0/direct?q={query}&limit=1&appid={WEATHER_API_KEY}"
             async with session.get(geo_url) as geo_resp:
@@ -113,32 +111,69 @@ async def units(ctx, preference: str):
     conn.commit()
     await ctx.send(f"✅ Preferences updated! I will now show you weather in **{display}**.")
 
-# --- CHANGED: Renamed function and updated aliases ---
-# .wx, .we, .wea will trigger this. .w will NOT.
 @bot.command(aliases=['wx', 'we', 'wea']) 
 async def weather(ctx, *, location: str = None):
-    user_id = ctx.author.id
-
-    cursor.execute('SELECT location, units FROM users WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
+    # Default to the author (the person typing the command)
+    target_user_id = ctx.author.id
+    search_query = None
     
-    saved_location = result[0] if result else None
-    user_units = result[1] if result and result[1] else 'imperial'
-
+    # 1. Determine if the user provided an input
     if location:
-        cursor.execute('''
-            INSERT INTO users (user_id, location, units) VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET location=excluded.location
-        ''', (user_id, location, user_units))
-        conn.commit()
-        search_query = location
-    elif saved_location:
-        search_query = saved_location
-    else:
-        await ctx.send("❌ **No location found!**\nPlease type `.wx <ZipCode>` or `.wx <City>`.")
-        return
+        # 2. Check if the input is a Mention (e.g., <@123456789>)
+        try:
+            # Attempt to convert the string input into a Member object
+            converter = commands.MemberConverter()
+            target_member = await converter.convert(ctx, location)
+            
+            # --- IT IS A USER LOOKUP ---
+            target_user_id = target_member.id
+            
+            # Retrieve that target user's location (READ ONLY)
+            cursor.execute('SELECT location FROM users WHERE user_id = ?', (target_user_id,))
+            result = cursor.fetchone()
+            
+            if result:
+                search_query = result[0]
+            else:
+                await ctx.send(f"❌ **{target_member.display_name}** hasn't set their location yet!")
+                return
+                
+        except commands.BadArgument:
+            # --- IT IS A NEW LOCATION SAVE ---
+            # The input was NOT a user, so it must be a city/zip.
+            # We save this to the AUTHOR'S profile (overwriting their old location)
+            
+            # First, get their existing unit preference so we don't lose it
+            cursor.execute('SELECT units FROM users WHERE user_id = ?', (ctx.author.id,))
+            res = cursor.fetchone()
+            user_units = res[0] if res and res[0] else 'imperial'
+            
+            cursor.execute('''
+                INSERT INTO users (user_id, location, units) VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET location=excluded.location
+            ''', (ctx.author.id, location, user_units))
+            conn.commit()
+            
+            search_query = location
 
-    data = await get_weather_data(search_query, user_units)
+    else:
+        # No input provided, just look up the author's own saved location
+        cursor.execute('SELECT location FROM users WHERE user_id = ?', (target_user_id,))
+        result = cursor.fetchone()
+        if result:
+            search_query = result[0]
+        else:
+            await ctx.send("❌ **No location found!**\nPlease type `.wx <ZipCode>` or `.wx <City>`.")
+            return
+
+    # 3. Fetch Units for the TARGET user (so we see it in their preferred units)
+    #    (Or you could change this to ctx.author.id if you always want to see YOUR units)
+    cursor.execute('SELECT units FROM users WHERE user_id = ?', (target_user_id,))
+    res = cursor.fetchone()
+    units_to_use = res[0] if res and res[0] else 'imperial'
+
+    # 4. Fetch Data
+    data = await get_weather_data(search_query, units_to_use)
     
     if data:
         city = data['name']
@@ -150,7 +185,7 @@ async def weather(ctx, *, location: str = None):
         condition = data['weather'][0]['description'].capitalize()
         icon_code = data['weather'][0]['icon']
         
-        if user_units == 'imperial':
+        if units_to_use == 'imperial':
             temp_label = "°F"
             speed_label = "mph"
         else:
@@ -167,7 +202,20 @@ async def weather(ctx, *, location: str = None):
         embed.add_field(name="Feels Like", value=f"{round(feels_like, 1)}{temp_label}", inline=True)
         embed.add_field(name="Humidity", value=f"{humidity}%", inline=True)
         embed.add_field(name="Wind Speed", value=f"{wind_speed} {speed_label}", inline=True)
-        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+        
+        # Footer now shows who requested it vs whose weather it is
+        req_text = f"Requested by {ctx.author.display_name}"
+        if target_user_id != ctx.author.id:
+            # If we looked up someone else, mention that in the footer
+            # We need to fetch the member object again if we don't have it handy
+            # or just generic text. Since we have target_user_id, we can try:
+            try:
+                target_user = await bot.fetch_user(target_user_id)
+                req_text += f" • For {target_user.display_name}"
+            except:
+                pass
+                
+        embed.set_footer(text=req_text)
 
         await ctx.send(embed=embed)
     else:
