@@ -43,26 +43,24 @@ async def get_weather_data(query, units):
         official_name = None
         country = "US"
 
-        # --- PATH A: US ZIP CODE LOOKUP (Using Zippopotam.us) ---
-        # We use this because it returns "Highlands Ranch" instead of "Douglas County"
+        # --- PATH A: US ZIP CODE LOOKUP (Zippopotam) ---
+        # Used to ensure we get City names (Highlands Ranch) instead of County names
         if query.replace(" ", "").isdigit() and len(query.strip()) == 5:
             try:
-                # This API is free and doesn't require a key
                 zip_url = f"http://api.zippopotam.us/us/{query.strip()}"
                 async with session.get(zip_url) as zip_resp:
                     if zip_resp.status == 200:
                         zip_data = await zip_resp.json()
                         place = zip_data['places'][0]
-                        
-                        official_name = place['place name'] # e.g., "Highlands Ranch"
+                        official_name = place['place name']
                         lat = place['latitude']
                         lon = place['longitude']
                         country = "US"
             except Exception as e:
                 print(f"Zippopotam lookup failed: {e}")
 
-        # --- PATH B: STANDARD OWM LOOKUP (Fallback or Non-Zip) ---
-        # If Path A didn't run or failed, or if it's not a US zip, use OpenWeatherMap
+        # --- PATH B: OPENWEATHERMAP FALLBACK ---
+        # Used for International cities or if Zippopotam fails
         if not lat or not lon:
             geo_url = f"http://api.openweathermap.org/geo/1.0/direct?q={query}&limit=1&appid={WEATHER_API_KEY}"
             async with session.get(geo_url) as geo_resp:
@@ -77,13 +75,12 @@ async def get_weather_data(query, units):
                 official_name = location_info['name']
                 country = location_info.get('country', 'US')
 
-        # --- STEP 3: GET WEATHER ---
+        # --- STEP 3: WEATHER ---
         weather_url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units={units}"
         
         async with session.get(weather_url) as weather_resp:
             if weather_resp.status == 200:
                 weather_data = await weather_resp.json()
-                # Force the name to be the one we found earlier (Highlands Ranch)
                 weather_data['name'] = official_name
                 weather_data['sys']['country'] = country
                 return weather_data
@@ -116,8 +113,10 @@ async def units(ctx, preference: str):
     conn.commit()
     await ctx.send(f"✅ Preferences updated! I will now show you weather in **{display}**.")
 
-@bot.command(aliases=['we', 'wea'])
-async def w(ctx, *, location: str = None):
+# --- CHANGED: Renamed function and updated aliases ---
+# .wx, .we, .wea will trigger this. .w will NOT.
+@bot.command(aliases=['wx', 'we', 'wea']) 
+async def weather(ctx, *, location: str = None):
     user_id = ctx.author.id
 
     cursor.execute('SELECT location, units FROM users WHERE user_id = ?', (user_id,))
@@ -136,7 +135,7 @@ async def w(ctx, *, location: str = None):
     elif saved_location:
         search_query = saved_location
     else:
-        await ctx.send("❌ **No location found!**\nPlease type `.w <ZipCode>` or `.w <City>`.")
+        await ctx.send("❌ **No location found!**\nPlease type `.wx <ZipCode>` or `.wx <City>`.")
         return
 
     data = await get_weather_data(search_query, user_units)
