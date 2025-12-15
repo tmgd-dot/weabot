@@ -15,6 +15,7 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
+# Create table with 'units' column default to imperial (Fahrenheit)
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -24,10 +25,11 @@ cursor.execute('''
 ''')
 conn.commit()
 
-# Schema migration
+# Migration: Check if 'units' column exists, add it if not
 try:
     cursor.execute("SELECT units FROM users LIMIT 1")
 except sqlite3.OperationalError:
+    print("Migrating database: Adding 'units' column...")
     cursor.execute("ALTER TABLE users ADD COLUMN units TEXT DEFAULT 'imperial'")
     conn.commit()
 
@@ -44,6 +46,8 @@ async def get_weather_data(query, units):
         country = "US"
 
         # --- PATH A: US ZIP CODE LOOKUP (Zippopotam) ---
+        # We use this to get the "Postal City" name (e.g. Highlands Ranch)
+        # instead of the County name (Douglas County).
         if query.replace(" ", "").isdigit() and len(query.strip()) == 5:
             try:
                 zip_url = f"http://api.zippopotam.us/us/{query.strip()}"
@@ -59,6 +63,7 @@ async def get_weather_data(query, units):
                 print(f"Zippopotam lookup failed: {e}")
 
         # --- PATH B: OPENWEATHERMAP FALLBACK ---
+        # If Path A failed or it's not a zip, use standard OWM Geocoding
         if not lat or not lon:
             geo_url = f"http://api.openweathermap.org/geo/1.0/direct?q={query}&limit=1&appid={WEATHER_API_KEY}"
             async with session.get(geo_url) as geo_resp:
@@ -73,7 +78,7 @@ async def get_weather_data(query, units):
                 official_name = location_info['name']
                 country = location_info.get('country', 'US')
 
-        # --- STEP 3: WEATHER ---
+        # --- STEP 3: FETCH WEATHER ---
         weather_url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units={units}"
         
         async with session.get(weather_url) as weather_resp:
@@ -91,6 +96,7 @@ async def on_ready():
 
 @bot.command(aliases=['u', 'unit'])
 async def units(ctx, preference: str):
+    """Sets the user's preferred units (metric/imperial)."""
     user_id = ctx.author.id
     preference = preference.lower()
     
@@ -113,22 +119,21 @@ async def units(ctx, preference: str):
 
 @bot.command(aliases=['wx', 'we', 'wea']) 
 async def weather(ctx, *, location: str = None):
-    # Default to the author (the person typing the command)
+    # Default target is the author
     target_user_id = ctx.author.id
     search_query = None
     
-    # 1. Determine if the user provided an input
+    # 1. Check Input (Is it a Location or a User Mention?)
     if location:
-        # 2. Check if the input is a Mention (e.g., <@123456789>)
         try:
-            # Attempt to convert the string input into a Member object
+            # Try to convert input to a User (e.g. .wx @Friend)
             converter = commands.MemberConverter()
             target_member = await converter.convert(ctx, location)
             
-            # --- IT IS A USER LOOKUP ---
+            # If successful, we are looking up THAT user
             target_user_id = target_member.id
             
-            # Retrieve that target user's location (READ ONLY)
+            # Read-Only lookup
             cursor.execute('SELECT location FROM users WHERE user_id = ?', (target_user_id,))
             result = cursor.fetchone()
             
@@ -139,11 +144,10 @@ async def weather(ctx, *, location: str = None):
                 return
                 
         except commands.BadArgument:
-            # --- IT IS A NEW LOCATION SAVE ---
-            # The input was NOT a user, so it must be a city/zip.
-            # We save this to the AUTHOR'S profile (overwriting their old location)
+            # Input is NOT a user, so it's a City/Zip.
+            # Save this to the AUTHOR'S profile.
             
-            # First, get their existing unit preference so we don't lose it
+            # Fetch existing units to preserve them
             cursor.execute('SELECT units FROM users WHERE user_id = ?', (ctx.author.id,))
             res = cursor.fetchone()
             user_units = res[0] if res and res[0] else 'imperial'
@@ -157,7 +161,7 @@ async def weather(ctx, *, location: str = None):
             search_query = location
 
     else:
-        # No input provided, just look up the author's own saved location
+        # No input, check Author's saved location
         cursor.execute('SELECT location FROM users WHERE user_id = ?', (target_user_id,))
         result = cursor.fetchone()
         if result:
@@ -166,13 +170,12 @@ async def weather(ctx, *, location: str = None):
             await ctx.send("❌ **No location found!**\nPlease type `.wx <ZipCode>` or `.wx <City>`.")
             return
 
-    # 3. Fetch Units for the TARGET user (so we see it in their preferred units)
-    #    (Or you could change this to ctx.author.id if you always want to see YOUR units)
+    # 2. Get Units for the TARGET user
     cursor.execute('SELECT units FROM users WHERE user_id = ?', (target_user_id,))
     res = cursor.fetchone()
     units_to_use = res[0] if res and res[0] else 'imperial'
 
-    # 4. Fetch Data
+    # 3. Fetch Data
     data = await get_weather_data(search_query, units_to_use)
     
     if data:
@@ -185,6 +188,7 @@ async def weather(ctx, *, location: str = None):
         condition = data['weather'][0]['description'].capitalize()
         icon_code = data['weather'][0]['icon']
         
+        # Set labels
         if units_to_use == 'imperial':
             temp_label = "°F"
             speed_label = "mph"
@@ -197,24 +201,25 @@ async def weather(ctx, *, location: str = None):
             description=f"**{condition}**",
             color=0x3498db
         )
-        embed.set_thumbnail(url=f"http://openweathermap.org/img/wn/{icon_code}@2x.png")
+        
+        # --- THE ICON UPGRADE ---
+        # We use the @4x URL to get a large, crisp PNG image.
+        icon_url = f"http://openweathermap.org/img/wn/{icon_code}@4x.png"
+        embed.set_thumbnail(url=icon_url)
+
         embed.add_field(name="Temperature", value=f"{round(temp, 1)}{temp_label}", inline=True)
         embed.add_field(name="Feels Like", value=f"{round(feels_like, 1)}{temp_label}", inline=True)
         embed.add_field(name="Humidity", value=f"{humidity}%", inline=True)
         embed.add_field(name="Wind Speed", value=f"{wind_speed} {speed_label}", inline=True)
         
-        # Footer now shows who requested it vs whose weather it is
+        # Smart Footer
         req_text = f"Requested by {ctx.author.display_name}"
         if target_user_id != ctx.author.id:
-            # If we looked up someone else, mention that in the footer
-            # We need to fetch the member object again if we don't have it handy
-            # or just generic text. Since we have target_user_id, we can try:
             try:
                 target_user = await bot.fetch_user(target_user_id)
                 req_text += f" • For {target_user.display_name}"
             except:
                 pass
-                
         embed.set_footer(text=req_text)
 
         await ctx.send(embed=embed)
