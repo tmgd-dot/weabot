@@ -39,59 +39,51 @@ bot = commands.Bot(command_prefix='.', intents=intents)
 async def get_weather_data(query, units):
     async with aiohttp.ClientSession() as session:
         
-        # --- STEP 1: INITIAL LOOKUP ---
-        is_zip = False
-        # Clean query to check for 5-digit zip
-        if query.replace(" ", "").isdigit() and len(query.strip()) == 5:
-            is_zip = True
-            geo_url = f"http://api.openweathermap.org/geo/1.0/zip?zip={query.strip()},US&appid={WEATHER_API_KEY}"
-        else:
-            geo_url = f"http://api.openweathermap.org/geo/1.0/direct?q={query}&limit=1&appid={WEATHER_API_KEY}"
+        lat, lon = None, None
+        official_name = None
+        country = "US"
 
-        async with session.get(geo_url) as geo_resp:
-            if geo_resp.status != 200:
-                return None
-            
-            geo_data = await geo_resp.json()
-            
-            if isinstance(geo_data, list):
+        # --- PATH A: US ZIP CODE LOOKUP (Using Zippopotam.us) ---
+        # We use this because it returns "Highlands Ranch" instead of "Douglas County"
+        if query.replace(" ", "").isdigit() and len(query.strip()) == 5:
+            try:
+                # This API is free and doesn't require a key
+                zip_url = f"http://api.zippopotam.us/us/{query.strip()}"
+                async with session.get(zip_url) as zip_resp:
+                    if zip_resp.status == 200:
+                        zip_data = await zip_resp.json()
+                        place = zip_data['places'][0]
+                        
+                        official_name = place['place name'] # e.g., "Highlands Ranch"
+                        lat = place['latitude']
+                        lon = place['longitude']
+                        country = "US"
+            except Exception as e:
+                print(f"Zippopotam lookup failed: {e}")
+
+        # --- PATH B: STANDARD OWM LOOKUP (Fallback or Non-Zip) ---
+        # If Path A didn't run or failed, or if it's not a US zip, use OpenWeatherMap
+        if not lat or not lon:
+            geo_url = f"http://api.openweathermap.org/geo/1.0/direct?q={query}&limit=1&appid={WEATHER_API_KEY}"
+            async with session.get(geo_url) as geo_resp:
+                if geo_resp.status != 200: return None
+                geo_data = await geo_resp.json()
+                
                 if not geo_data: return None
                 location_info = geo_data[0]
-            else:
-                location_info = geo_data
+                
+                lat = location_info['lat']
+                lon = location_info['lon']
+                official_name = location_info['name']
+                country = location_info.get('country', 'US')
 
-            lat = location_info['lat']
-            lon = location_info['lon']
-            official_name = location_info['name']
-            country = location_info.get('country', 'US')
-
-        # --- STEP 2: REVERSE GEOCODING (The "No County" Filter) ---
-        # If the user provided a zip, we double-check the name to avoid "Douglas County"
-        if is_zip:
-            # We ask for up to 5 nearby names
-            reverse_url = f"http://api.openweathermap.org/geo/1.0/reverse?lat={lat}&lon={lon}&limit=5&appid={WEATHER_API_KEY}"
-            async with session.get(reverse_url) as rev_resp:
-                if rev_resp.status == 200:
-                    rev_data = await rev_resp.json()
-                    if rev_data:
-                        # FILTER LOGIC: Look for the first name that isn't a "County"
-                        found_better_name = False
-                        for place in rev_data:
-                            if "County" not in place['name']:
-                                official_name = place['name']
-                                found_better_name = True
-                                break
-                        
-                        # If every single result was a County (rare), just stick with the first one
-                        if not found_better_name:
-                             official_name = rev_data[0]['name']
-
-        # --- STEP 3: WEATHER ---
+        # --- STEP 3: GET WEATHER ---
         weather_url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units={units}"
         
         async with session.get(weather_url) as weather_resp:
             if weather_resp.status == 200:
                 weather_data = await weather_resp.json()
+                # Force the name to be the one we found earlier (Highlands Ranch)
                 weather_data['name'] = official_name
                 weather_data['sys']['country'] = country
                 return weather_data
