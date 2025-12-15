@@ -24,7 +24,7 @@ cursor.execute('''
 ''')
 conn.commit()
 
-# Schema migration (if needed)
+# Schema migration
 try:
     cursor.execute("SELECT units FROM users LIMIT 1")
 except sqlite3.OperationalError:
@@ -40,8 +40,8 @@ async def get_weather_data(query, units):
     async with aiohttp.ClientSession() as session:
         
         # --- STEP 1: INITIAL LOOKUP ---
-        # Determine if Zip or City
         is_zip = False
+        # Clean query to check for 5-digit zip
         if query.replace(" ", "").isdigit() and len(query.strip()) == 5:
             is_zip = True
             geo_url = f"http://api.openweathermap.org/geo/1.0/zip?zip={query.strip()},US&appid={WEATHER_API_KEY}"
@@ -54,7 +54,6 @@ async def get_weather_data(query, units):
             
             geo_data = await geo_resp.json()
             
-            # Handle Zip (dict) vs Direct (list)
             if isinstance(geo_data, list):
                 if not geo_data: return None
                 location_info = geo_data[0]
@@ -63,22 +62,29 @@ async def get_weather_data(query, units):
 
             lat = location_info['lat']
             lon = location_info['lon']
-            
-            # Default name from the first lookup
             official_name = location_info['name']
             country = location_info.get('country', 'US')
 
-        # --- STEP 2: REVERSE GEOCODING (Fix for "Douglas County") ---
-        # If we used a Zip code, the name is often a county. 
-        # We query the Reverse API to get the actual City name for these coordinates.
+        # --- STEP 2: REVERSE GEOCODING (The "No County" Filter) ---
+        # If the user provided a zip, we double-check the name to avoid "Douglas County"
         if is_zip:
-            reverse_url = f"http://api.openweathermap.org/geo/1.0/reverse?lat={lat}&lon={lon}&limit=1&appid={WEATHER_API_KEY}"
+            # We ask for up to 5 nearby names
+            reverse_url = f"http://api.openweathermap.org/geo/1.0/reverse?lat={lat}&lon={lon}&limit=5&appid={WEATHER_API_KEY}"
             async with session.get(reverse_url) as rev_resp:
                 if rev_resp.status == 200:
                     rev_data = await rev_resp.json()
                     if rev_data:
-                        # Overwrite with the specific city name (e.g., Highlands Ranch)
-                        official_name = rev_data[0]['name']
+                        # FILTER LOGIC: Look for the first name that isn't a "County"
+                        found_better_name = False
+                        for place in rev_data:
+                            if "County" not in place['name']:
+                                official_name = place['name']
+                                found_better_name = True
+                                break
+                        
+                        # If every single result was a County (rare), just stick with the first one
+                        if not found_better_name:
+                             official_name = rev_data[0]['name']
 
         # --- STEP 3: WEATHER ---
         weather_url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units={units}"
