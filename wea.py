@@ -46,8 +46,6 @@ async def get_weather_data(query, units):
         country = "US"
 
         # --- PATH A: US ZIP CODE LOOKUP (Zippopotam) ---
-        # We use this to get the "Postal City" name (e.g. Highlands Ranch)
-        # instead of the County name (Douglas County).
         if query.replace(" ", "").isdigit() and len(query.strip()) == 5:
             try:
                 zip_url = f"http://api.zippopotam.us/us/{query.strip()}"
@@ -63,10 +61,17 @@ async def get_weather_data(query, units):
                 print(f"Zippopotam lookup failed: {e}")
 
         # --- PATH B: OPENWEATHERMAP FALLBACK ---
-        # If Path A failed or it's not a zip, use standard OWM Geocoding
         if not lat or not lon:
-            geo_url = f"http://api.openweathermap.org/geo/1.0/direct?q={query}&limit=1&appid={WEATHER_API_KEY}"
-            async with session.get(geo_url) as geo_resp:
+            geo_url = "http://api.openweathermap.org/geo/1.0/direct"
+            
+            # Using params safely encodes spaces and commas (e.g. "Cleveland, OH")
+            geo_params = {
+                "q": query,
+                "limit": 1,
+                "appid": WEATHER_API_KEY
+            }
+            
+            async with session.get(geo_url, params=geo_params) as geo_resp:
                 if geo_resp.status != 200: return None
                 geo_data = await geo_resp.json()
                 
@@ -79,9 +84,16 @@ async def get_weather_data(query, units):
                 country = location_info.get('country', 'US')
 
         # --- STEP 3: FETCH WEATHER ---
-        weather_url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units={units}"
+        weather_url = "http://api.openweathermap.org/data/2.5/weather"
         
-        async with session.get(weather_url) as weather_resp:
+        weather_params = {
+            "lat": lat,
+            "lon": lon,
+            "appid": WEATHER_API_KEY,
+            "units": units
+        }
+        
+        async with session.get(weather_url, params=weather_params) as weather_resp:
             if weather_resp.status == 200:
                 weather_data = await weather_resp.json()
                 weather_data['name'] = official_name
@@ -117,6 +129,29 @@ async def units(ctx, preference: str):
     conn.commit()
     await ctx.send(f"✅ Preferences updated! I will now show you weather in **{display}**.")
 
+@bot.command(aliases=['setloc', 'location'])
+async def setlocation(ctx, *, location: str = None):
+    """Sets the user's default location for the .wx command."""
+    if not location:
+        await ctx.send("❓ Please provide a location. Example: `.setloc Cleveland, OH`")
+        return
+
+    user_id = ctx.author.id
+    
+    # Fetch existing units to preserve them
+    cursor.execute('SELECT units FROM users WHERE user_id = ?', (user_id,))
+    res = cursor.fetchone()
+    user_units = res[0] if res and res[0] else 'imperial'
+    
+    cursor.execute('''
+        INSERT INTO users (user_id, location, units) VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET location=excluded.location
+    ''', (user_id, location, user_units))
+    conn.commit()
+    
+    await ctx.send(f"✅ Default location securely set to **{location}**!\nYou can now just type `.wx` to get your local weather.")
+
+
 @bot.command(aliases=['wx', 'we', 'wea']) 
 async def weather(ctx, *, location: str = None):
     # Default target is the author
@@ -137,37 +172,26 @@ async def weather(ctx, *, location: str = None):
             cursor.execute('SELECT location FROM users WHERE user_id = ?', (target_user_id,))
             result = cursor.fetchone()
             
-            if result:
+            if result and result[0]:
                 search_query = result[0]
             else:
-                await ctx.send(f"❌ **{target_member.display_name}** hasn't set their location yet!")
+                await ctx.send(f"❌ **{target_member.display_name}** hasn't set their default location yet!")
                 return
                 
         except commands.BadArgument:
             # Input is NOT a user, so it's a City/Zip.
-            # Save this to the AUTHOR'S profile.
-            
-            # Fetch existing units to preserve them
-            cursor.execute('SELECT units FROM users WHERE user_id = ?', (ctx.author.id,))
-            res = cursor.fetchone()
-            user_units = res[0] if res and res[0] else 'imperial'
-            
-            cursor.execute('''
-                INSERT INTO users (user_id, location, units) VALUES (?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET location=excluded.location
-            ''', (ctx.author.id, location, user_units))
-            conn.commit()
-            
+            # Do NOT save to database, just set it as a temporary lookup.
             search_query = location
 
     else:
         # No input, check Author's saved location
         cursor.execute('SELECT location FROM users WHERE user_id = ?', (target_user_id,))
         result = cursor.fetchone()
-        if result:
+        
+        if result and result[0]:
             search_query = result[0]
         else:
-            await ctx.send("❌ **No location found!**\nPlease type `.wx <ZipCode>` or `.wx <City>`.")
+            await ctx.send("❌ **No default location found!**\nPlease type `.setloc <City or Zip>` to set your default, or look up a place directly with `.wx <City>`.")
             return
 
     # 2. Get Units for the TARGET user
@@ -202,8 +226,7 @@ async def weather(ctx, *, location: str = None):
             color=0x3498db
         )
         
-        # --- THE ICON UPGRADE ---
-        # We use the @4x URL to get a large, crisp PNG image.
+        # The Icon Upgrade
         icon_url = f"http://openweathermap.org/img/wn/{icon_code}@4x.png"
         embed.set_thumbnail(url=icon_url)
 
