@@ -45,8 +45,11 @@ async def get_weather_data(query, units):
         official_name = None
         country = "US"
 
+        # Check if the query looks like a 5-digit US ZIP code
+        is_zip = query.replace(" ", "").isdigit() and len(query.strip()) == 5
+
         # --- PATH A: US ZIP CODE LOOKUP (Zippopotam) ---
-        if query.replace(" ", "").isdigit() and len(query.strip()) == 5:
+        if is_zip:
             try:
                 zip_url = f"http://api.zippopotam.us/us/{query.strip()}"
                 async with session.get(zip_url) as zip_resp:
@@ -62,30 +65,45 @@ async def get_weather_data(query, units):
 
         # --- PATH B: OPENWEATHERMAP FALLBACK ---
         if not lat or not lon:
-            geo_url = "http://api.openweathermap.org/geo/1.0/direct"
-            
-            # Using params safely encodes spaces and commas (e.g. "Cleveland, OH")
-            geo_params = {
-                "q": query,
-                "limit": 1,
-                "appid": WEATHER_API_KEY
-            }
-            
-            async with session.get(geo_url, params=geo_params) as geo_resp:
-                if geo_resp.status != 200: return None
-                geo_data = await geo_resp.json()
+            if is_zip:
+                # Use OpenWeatherMap's dedicated ZIP endpoint
+                geo_url = "http://api.openweathermap.org/geo/1.0/zip"
+                geo_params = {
+                    "zip": f"{query.strip()},US",
+                    "appid": WEATHER_API_KEY
+                }
                 
-                if not geo_data: return None
-                location_info = geo_data[0]
+                async with session.get(geo_url, params=geo_params) as geo_resp:
+                    if geo_resp.status == 200:
+                        geo_data = await geo_resp.json()
+                        lat = geo_data['lat']
+                        lon = geo_data['lon']
+                        official_name = geo_data['name']
+                        country = geo_data.get('country', 'US')
+            else:
+                # Use OpenWeatherMap's standard City endpoint
+                geo_url = "http://api.openweathermap.org/geo/1.0/direct"
+                geo_params = {
+                    "q": query,
+                    "limit": 1,
+                    "appid": WEATHER_API_KEY
+                }
                 
-                lat = location_info['lat']
-                lon = location_info['lon']
-                official_name = location_info['name']
-                country = location_info.get('country', 'US')
+                async with session.get(geo_url, params=geo_params) as geo_resp:
+                    if geo_resp.status == 200:
+                        geo_data = await geo_resp.json()
+                        if geo_data:
+                            location_info = geo_data[0]
+                            lat = location_info['lat']
+                            lon = location_info['lon']
+                            official_name = location_info['name']
+                            country = location_info.get('country', 'US')
 
         # --- STEP 3: FETCH WEATHER ---
+        if not lat or not lon:
+            return None # If we still don't have coordinates, abort
+            
         weather_url = "http://api.openweathermap.org/data/2.5/weather"
-        
         weather_params = {
             "lat": lat,
             "lon": lon,
@@ -133,7 +151,7 @@ async def units(ctx, preference: str):
 async def setlocation(ctx, *, location: str = None):
     """Sets the user's default location for the .wx command."""
     if not location:
-        await ctx.send("❓ Please provide a location. Example: `.setloc Cleveland, OH`")
+        await ctx.send("❓ Please provide a location. Example: `.setloc Cleveland, OH` or `.setloc 80129`")
         return
 
     user_id = ctx.author.id
