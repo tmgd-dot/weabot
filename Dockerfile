@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -6,8 +6,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the code
-COPY . .
+# Copy bot source
+COPY wea.py .
 
-# Run the bot
-CMD ["python", "wea.py"]
+# /data is a mounted volume for persistent user location storage
+VOLUME ["/data"]
+
+CMD ["python", "-u", "wea.py"]
